@@ -2,18 +2,21 @@
 
 import argparse
 import sys
+from pathlib import Path
 
 from paper_podcast import enrich, pick, podcast
 from paper_podcast.zotero import Zotero
 
 
 def main() -> None:
-    """Runs `enrich`, `podcast`, `progress`, `pause` or `resume`."""
+    """Runs `enrich`, `podcast`, `backfill-read`, `progress`, `pause` or `resume`."""
     parser = argparse.ArgumentParser(prog="paper-podcast")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("podcast", help="make one episode").add_argument(
-        "--item", help="Zotero item key to use instead of a random pick (for testing)"
-    )
+    make = sub.add_parser("podcast", help="make one episode")
+    make.add_argument("--item", help="Zotero item key to use instead of a random pick")
+    make.add_argument("--pdf", type=Path, help="a downloaded PDF to use instead of fetching one; needs --item")
+    backfill = sub.add_parser("backfill-read", help="tag every item lacking `to-read` as `read`")
+    backfill.add_argument("--apply", action="store_true", help="write the tags (default is a dry run)")
     for name, text in [
         ("enrich", "tag items changed since the last run"),
         ("progress", "count read papers and articles"),
@@ -25,7 +28,11 @@ def main() -> None:
     if args.command == "enrich":
         enrich.run()
     elif args.command == "podcast":
-        podcast.run(only_key=args.item)
+        if args.pdf and not args.item:
+            parser.error("--pdf needs --item")
+        podcast.run(only_key=args.item, pdf=args.pdf)
+    elif args.command == "backfill-read":
+        enrich.backfill_read(Zotero(), apply=args.apply)
     elif args.command == "progress":
         for heading, items in zip(("papers", "articles"), pick.split_kinds(Zotero().items())):
             print(pick.progress(heading, items))

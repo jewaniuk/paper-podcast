@@ -4,7 +4,7 @@ from datetime import date
 
 import pytest
 
-from paper_podcast import cli, pick, podcast
+from paper_podcast import cli, enrich, pick, podcast
 from paper_podcast.identifiers import arxiv_id, clean_url, doi_from_url
 
 
@@ -167,3 +167,60 @@ def test_with_retry_retries_server_errors_then_gives_up(monkeypatch):
 
     with pytest.raises(podcast.errors.ServerError):
         podcast.with_retry(always, waits=(1, 2))
+
+
+def _tagged(key, *tags, item_type="journalArticle"):
+    return {"key": key, "version": 1, "data": {"itemType": item_type, "tags": [{"tag": t} for t in tags]}}
+
+
+def test_status_tags_only_for_items_with_neither():
+    assert enrich.status_tags(set(), "journalArticle") == ["to-read"]
+    assert enrich.status_tags({"to-read"}, "journalArticle") == []
+    assert enrich.status_tags({"read"}, "journalArticle") == []
+    assert enrich.status_tags(set(), "note") == []
+
+
+class _FakeZotero:
+    def __init__(self, items):
+        self._items, self.written = items, []
+
+    def items(self):
+        return self._items
+
+    def write(self, items):
+        self.written += items
+
+
+def test_backfill_read_dry_run_changes_nothing(capsys):
+    zotero = _FakeZotero([_tagged("A"), _tagged("B", "to-read"), _tagged("C", "read"), _tagged("D", item_type="note")])
+    assert enrich.backfill_read(zotero) == 1
+    assert zotero.written == []
+    assert "would tag 1 items" in capsys.readouterr().out
+
+
+def test_backfill_read_apply_tags_only_the_untagged():
+    zotero = _FakeZotero([_tagged("A", "keyword"), _tagged("B", "to-read"), _tagged("C", "read")])
+    enrich.backfill_read(zotero, apply=True)
+    assert [u["key"] for u in zotero.written] == ["A"]
+    assert zotero.written[0]["tags"] == [{"tag": "keyword"}, {"tag": "read"}]
+
+
+def test_run_uses_given_pdf_instead_of_source_chain(monkeypatch, tmp_path):
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"pdf bytes")
+    item = {"key": "K", "version": 1, "data": {"itemType": "journalArticle", "title": "T", "tags": []}}
+    zotero = type("Z", (), {"items": lambda self: [item], "add_tags": lambda self, i, t: None})()
+    seen = {}
+    monkeypatch.setattr(podcast, "Zotero", lambda: zotero)
+    monkeypatch.setattr(podcast, "upgrade_preprint", lambda z, i: i)
+    monkeypatch.setattr(podcast, "pdf_text", lambda b: seen.setdefault("pdf", b) and "text")
+    monkeypatch.setattr(podcast, "get_text", lambda d: pytest.fail("source chain used"))
+    monkeypatch.setattr(podcast, "env", lambda name: "x")
+    monkeypatch.setattr(podcast.genai, "Client", lambda **k: None)
+    monkeypatch.setattr(podcast, "SCRIPTS_DIR", tmp_path / "scripts")
+    monkeypatch.setattr(podcast, "write_script", lambda c, d, t: "Alex: hi")
+    monkeypatch.setattr(podcast, "synthesize", lambda c, s: b"mp3")
+    monkeypatch.setattr(podcast, "tag_mp3", lambda p, i: None)
+    podcast.run(tmp_path / "out", only_key="K", pdf=pdf)
+    assert seen["pdf"] == b"pdf bytes"
+    assert len(list((tmp_path / "out").glob("*.mp3"))) == 1

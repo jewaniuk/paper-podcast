@@ -95,6 +95,18 @@ def file_name(item: dict, today: date) -> str:
     return f"{today:%Y-%m-%d} {who} {year} - {title}.mp3"
 
 
+def pdf_text(pdf: bytes) -> str:
+    """Extracts the text of a PDF.
+
+    Args:
+        pdf: The PDF file's bytes.
+
+    Returns:
+        The text of every page, joined by newlines.
+    """
+    return "\n".join(p.extract_text() for p in PdfReader(io.BytesIO(pdf)).pages)
+
+
 def get_text(data: dict) -> str | None:
     """Gets the source text: the PDF for papers, the web page for articles.
 
@@ -119,7 +131,7 @@ def get_text(data: dict) -> str | None:
     for attempt in attempts:
         pdf = attempt()
         if pdf:
-            return "\n".join(p.extract_text() for p in PdfReader(io.BytesIO(pdf)).pages)
+            return pdf_text(pdf)
     return None
 
 
@@ -267,7 +279,7 @@ def upgrade_preprint(zotero: Zotero, item: dict) -> dict:
     return item if "failed" in saved else saved
 
 
-def run(directory: Path = PODCASTS_DIR, only_key: str | None = None) -> None:
+def run(directory: Path = PODCASTS_DIR, only_key: str | None = None, pdf: Path | None = None) -> None:
     """Makes one episode, unless paused.
 
     Picks random eligible items (swapping a preprint for its journal
@@ -279,6 +291,8 @@ def run(directory: Path = PODCASTS_DIR, only_key: str | None = None) -> None:
         directory: The iCloud `Podcasts/` directory.
         only_key: Zotero item key to make the episode from, for testing; skips
             the random pick and the `to-read` and `podcasted` checks.
+        pdf: A PDF the user downloaded, used instead of the source chain; needs
+            `only_key` to say which item it belongs to.
     """
     if is_paused(directory):
         print("paused, nothing to do")
@@ -289,7 +303,7 @@ def run(directory: Path = PODCASTS_DIR, only_key: str | None = None) -> None:
     random.shuffle(pool)
     for item in pool:
         item = upgrade_preprint(zotero, item)
-        text = get_text(item["data"])
+        text = pdf_text(pdf.read_bytes()) if pdf else get_text(item["data"])
         if text is None:
             zotero.add_tags(item, ["no-pdf"])
             continue
