@@ -1,0 +1,232 @@
+"""Making one podcast episode: pick, fetch text, write the script, voice it, save, tag."""
+
+import io
+import random
+import re
+import wave
+from datetime import date
+from pathlib import Path
+
+import lameenc
+from pypdf import PdfReader
+from google import genai
+from google.genai import types
+from mutagen.id3 import COMM, ID3, TIT2, TPE1, WOAF
+
+from paper_podcast import sources
+from paper_podcast.config import GEMINI_TEXT_MODEL, GEMINI_TTS_MODEL, PODCASTS_DIR, env
+from paper_podcast.identifiers import arxiv_id
+from paper_podcast.pick import to_read
+from paper_podcast.zotero import Zotero
+
+HOSTS = {"Alex": "Kore", "Sam": "Puck"}  # speaker name -> Gemini voice
+SAMPLE_RATE = 24000  # Gemini tts output: 16-bit mono pcm at 24 kHz
+TTS_CHUNK_CHARS = 3500  # tts requests are limited in length, so the script is voiced in pieces
+SCRIPT_PROMPT = """Write a podcast script of about 2600 words (a 15 to 20 minute episode) in which two hosts, \
+Alex and Sam, discuss the {kind} below for a listener who is a PhD student in quantum nanophotonics. \
+Explain the motivation, the key idea and results, and why it matters; be accurate and concrete, \
+and say when something is a limitation. Every line must start with "Alex:" or "Sam:". \
+No stage directions, headings or markdown.
+
+Title: {title}
+
+{text}"""
+
+
+def is_paused(directory: Path = PODCASTS_DIR) -> bool:
+    """Checks for the `paused` directory that stops new episodes.
+
+    Args:
+        directory: The iCloud `Podcasts/` directory.
+
+    Returns:
+        True if `paused` exists inside it.
+    """
+    return (directory / "paused").is_dir()
+
+
+def set_paused(paused: bool, directory: Path = PODCASTS_DIR) -> None:
+    """Creates or removes the `paused` directory.
+
+    Args:
+        paused: True to pause, False to resume.
+        directory: The iCloud `Podcasts/` directory.
+    """
+    flag = directory / "paused"
+    if paused:
+        flag.mkdir(parents=True, exist_ok=True)
+    elif flag.is_dir():
+        flag.rmdir()
+
+
+def eligible(items: list[dict]) -> list[dict]:
+    """Unread items that haven't been podcasted or marked as lacking a PDF.
+
+    Args:
+        items: Zotero item dicts.
+
+    Returns:
+        The items that may still be picked.
+    """
+    skip = {"podcasted", "no-pdf"}
+    return [i for i in to_read(items) if not skip & {t["tag"] for t in i["data"].get("tags", [])}]
+
+
+def file_name(item: dict, today: date) -> str:
+    """Builds `<YYYY-MM-DD> <first author> <year> - <title>.mp3`.
+
+    Args:
+        item: A Zotero item dict.
+        today: The episode date.
+
+    Returns:
+        A file name safe on iCloud and macOS (no slashes or colons);
+        articles have no first author, so their publication stands in.
+    """
+    data = item["data"]
+    creators = data.get("creators") or []
+    who = creators[0].get("lastName", "") if creators else data.get("publicationTitle", "")
+    year = (data.get("date") or "")[:4]
+    title = re.sub(r'[\\/:*?"<>|]', "", data["title"]).strip()[:120]
+    return f"{today:%Y-%m-%d} {who} {year} - {title}.mp3"
+
+
+def get_text(data: dict) -> str | None:
+    """Gets the source text: the PDF for papers, the web page for articles.
+
+    PDF order is publisher, arXiv, Unpaywall.
+
+    Args:
+        data: The `data` dict of a Zotero item.
+
+    Returns:
+        Text, or None if no PDF could be had (or the page is empty).
+    """
+    if data["itemType"] == "magazineArticle":
+        text = sources.page_text(data["url"])
+        return text if len(text) > 1000 else None
+    doi = data.get("DOI")
+    aid = arxiv_id(data.get("url", ""))
+    attempts = [
+        lambda: doi and sources.publisher_pdf(doi),
+        lambda: aid and sources.arxiv_pdf(aid),
+        lambda: doi and sources.unpaywall_pdf(doi, env("UNPAYWALL_EMAIL")),
+    ]
+    for attempt in attempts:
+        pdf = attempt()
+        if pdf:
+            return "\n".join(p.extract_text() for p in PdfReader(io.BytesIO(pdf)).pages)
+    return None
+
+
+def write_script(client: genai.Client, data: dict, text: str) -> str:
+    """Has Gemini write the two-host script.
+
+    Args:
+        client: Gemini client.
+        data: The item's `data` dict.
+        text: Paper or article text.
+
+    Returns:
+        The script, one `Alex:`/`Sam:` line per turn.
+    """
+    kind = "news article" if data["itemType"] == "magazineArticle" else "research paper"
+    prompt = SCRIPT_PROMPT.format(kind=kind, title=data["title"], text=text[:200_000])
+    return client.models.generate_content(model=GEMINI_TEXT_MODEL, contents=prompt).text.strip()
+
+
+def _chunks(script: str) -> list[str]:
+    pieces, current = [], ""
+    for line in script.splitlines():
+        if current and len(current) + len(line) > TTS_CHUNK_CHARS:
+            pieces.append(current)
+            current = ""
+        current += line + "\n"
+    return pieces + [current]
+
+
+def synthesize(client: genai.Client, script: str) -> bytes:
+    """Voices the script with Gemini multi-speaker text-to-speech.
+
+    Args:
+        client: Gemini client.
+        script: Lines starting `Alex:` or `Sam:`.
+
+    Returns:
+        mp3 bytes (mono, 64 kbit/s).
+    """
+    voices = [
+        types.SpeakerVoiceConfig(
+            speaker=name,
+            voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)),
+        )
+        for name, voice in HOSTS.items()
+    ]
+    config = types.GenerateContentConfig(
+        response_modalities=["AUDIO"],
+        speech_config=types.SpeechConfig(
+            multi_speaker_voice_config=types.MultiSpeakerVoiceConfig(speaker_voice_configs=voices)
+        ),
+    )
+    encoder = lameenc.Encoder()
+    encoder.set_bit_rate(64)
+    encoder.set_in_sample_rate(SAMPLE_RATE)
+    encoder.set_channels(1)
+    encoder.set_quality(2)
+    mp3 = b""
+    for piece in _chunks(script):
+        response = client.models.generate_content(model=GEMINI_TTS_MODEL, contents=piece, config=config)
+        mp3 += encoder.encode(response.candidates[0].content.parts[0].inline_data.data)
+    return mp3 + encoder.flush()
+
+
+def tag_mp3(path: Path, item: dict) -> None:
+    """Writes title, author, DOI and Zotero link into the mp3.
+
+    Args:
+        path: The saved mp3.
+        item: The Zotero item dict it was made from.
+    """
+    data = item["data"]
+    creators = data.get("creators") or []
+    link = f"zotero://select/library/items/{item['key']}"
+    tags = ID3()
+    tags.add(TIT2(encoding=3, text=data["title"]))
+    if creators:
+        tags.add(TPE1(encoding=3, text=creators[0].get("lastName", "")))
+    tags.add(COMM(encoding=3, lang="eng", desc="", text=f"DOI: {data.get('DOI', '-')}\n{link}"))
+    tags.add(WOAF(url=link))
+    tags.save(path)
+
+
+def run(directory: Path = PODCASTS_DIR) -> None:
+    """Makes one episode, unless paused.
+
+    Picks random eligible items until one yields text (items without one
+    are tagged `no-pdf`), writes and voices the script, saves the mp3 and
+    tags the item `podcasted`.
+
+    Args:
+        directory: The iCloud `Podcasts/` directory.
+    """
+    if is_paused(directory):
+        print("paused, nothing to do")
+        return
+    zotero = Zotero()
+    pool = eligible(zotero.items())
+    random.shuffle(pool)
+    for item in pool:
+        text = get_text(item["data"])
+        if text is None:
+            zotero.add_tags(item, ["no-pdf"])
+            continue
+        client = genai.Client(api_key=env("GEMINI_API_KEY"))
+        script = write_script(client, item["data"], text)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / file_name(item, date.today())
+        path.write_bytes(synthesize(client, script))
+        tag_mp3(path, item)
+        zotero.add_tags(item, ["podcasted"])
+        print(f"saved {path}")
+        return
+    print("no eligible items left")
