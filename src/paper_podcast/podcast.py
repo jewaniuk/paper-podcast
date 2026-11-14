@@ -1,16 +1,15 @@
 """Making one podcast episode: pick, fetch text, write the script, voice it, save, tag."""
 
+import base64
 import io
 import random
 import re
-import wave
 from datetime import date
 from pathlib import Path
 
 import lameenc
 from pypdf import PdfReader
 from google import genai
-from google.genai import types
 from mutagen.id3 import COMM, ID3, TIT2, TPE1, WOAF
 
 from paper_podcast import sources
@@ -22,6 +21,7 @@ from paper_podcast.zotero import Zotero
 HOSTS = {"Alex": "Kore", "Sam": "Puck"}  # speaker name -> Gemini voice
 SAMPLE_RATE = 24000  # Gemini tts output: 16-bit mono pcm at 24 kHz
 TTS_CHUNK_CHARS = 3500  # tts requests are limited in length, so the script is voiced in pieces
+SCRIPTS_DIR = Path(__file__).parents[2] / "scripts"  # generated scripts, never committed
 PROMPT_FILE = Path(__file__).parents[2] / "prompts" / "podcast.md"  # edit this file to change the episode style
 
 
@@ -132,18 +132,32 @@ def write_script(client: genai.Client, data: dict, text: str) -> str:
     return client.models.generate_content(model=GEMINI_TEXT_MODEL, contents=prompt).text.strip()
 
 
-def _chunks(script: str) -> list[str]:
-    pieces, current = [], ""
+def _turns(script: str) -> list[tuple[str, str]]:
+    """Splits a script into (speaker, text) turns, ignoring lines with no known speaker."""
+    turns = []
     for line in script.splitlines():
-        if current and len(current) + len(line) > TTS_CHUNK_CHARS:
+        speaker, _, text = line.partition(":")
+        if speaker.strip() in HOSTS and text.strip():
+            turns.append((speaker.strip(), text.strip()))
+    return turns
+
+
+def _chunks(turns: list[tuple[str, str]]) -> list[list[tuple[str, str]]]:
+    pieces, current, size = [], [], 0
+    for turn in turns:
+        if current and size + len(turn[1]) > TTS_CHUNK_CHARS:
             pieces.append(current)
-            current = ""
-        current += line + "\n"
+            current, size = [], 0
+        current.append(turn)
+        size += len(turn[1])
     return pieces + [current]
 
 
 def synthesize(client: genai.Client, script: str) -> bytes:
     """Voices the script with Gemini multi-speaker text-to-speech.
+
+    Uses the Interactions API, which the Gemini 3 TTS models require: each
+    turn is sent as a text block tagged with its speaker.
 
     Args:
         client: Gemini client.
@@ -152,28 +166,25 @@ def synthesize(client: genai.Client, script: str) -> bytes:
     Returns:
         mp3 bytes (mono, 64 kbit/s).
     """
-    voices = [
-        types.SpeakerVoiceConfig(
-            speaker=name,
-            voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)),
-        )
-        for name, voice in HOSTS.items()
-    ]
-    config = types.GenerateContentConfig(
-        response_modalities=["AUDIO"],
-        speech_config=types.SpeechConfig(
-            multi_speaker_voice_config=types.MultiSpeakerVoiceConfig(speaker_voice_configs=voices)
-        ),
-    )
+    speakers = [{"speaker": name, "voice": voice} for name, voice in HOSTS.items()]
     encoder = lameenc.Encoder()
     encoder.set_bit_rate(64)
     encoder.set_in_sample_rate(SAMPLE_RATE)
     encoder.set_channels(1)
     encoder.set_quality(2)
     mp3 = b""
-    for piece in _chunks(script):
-        response = client.models.generate_content(model=GEMINI_TTS_MODEL, contents=piece, config=config)
-        mp3 += encoder.encode(response.candidates[0].content.parts[0].inline_data.data)
+    for piece in _chunks(_turns(script)):
+        content = [
+            {"type": "text", "text": text, "annotations": [{"type": "speech_metadata", "speaker": speaker}]}
+            for speaker, text in piece
+        ]
+        interaction = client.interactions.create(
+            model=GEMINI_TTS_MODEL,
+            input=[{"type": "user_input", "content": content}],
+            response_format={"type": "audio", "mime_type": "audio/l16"},  # raw pcm, so chunks can be joined
+            generation_config={"speech_config": {"speakers": speakers}},
+        )
+        mp3 += encoder.encode(base64.b64decode(interaction.output_audio.data))
     return mp3 + encoder.flush()
 
 
@@ -218,7 +229,7 @@ def upgrade_preprint(zotero: Zotero, item: dict) -> dict:
     return item if "failed" in saved else saved
 
 
-def run(directory: Path = PODCASTS_DIR) -> None:
+def run(directory: Path = PODCASTS_DIR, only_key: str | None = None) -> None:
     """Makes one episode, unless paused.
 
     Picks random eligible items (swapping a preprint for its journal
@@ -228,12 +239,15 @@ def run(directory: Path = PODCASTS_DIR) -> None:
 
     Args:
         directory: The iCloud `Podcasts/` directory.
+        only_key: Zotero item key to make the episode from, for testing; skips
+            the random pick and the `to-read` and `podcasted` checks.
     """
     if is_paused(directory):
         print("paused, nothing to do")
         return
     zotero = Zotero()
-    pool = eligible(zotero.items())
+    items = zotero.items()
+    pool = [i for i in items if i["key"] == only_key] if only_key else eligible(items)
     random.shuffle(pool)
     for item in pool:
         item = upgrade_preprint(zotero, item)
@@ -241,10 +255,15 @@ def run(directory: Path = PODCASTS_DIR) -> None:
         if text is None:
             zotero.add_tags(item, ["no-pdf"])
             continue
-        client = genai.Client(api_key=env("GEMINI_API_KEY"))
-        script = write_script(client, item["data"], text)
+        client = genai.Client(api_key=env("GEMINI_API_KEY"), http_options={"api_version": "v1beta"})
+        name = file_name(item, date.today())
+        script_file = SCRIPTS_DIR / name.replace(".mp3", ".txt")
+        if not script_file.exists():  # a retry after a failed voicing reuses the script
+            SCRIPTS_DIR.mkdir(exist_ok=True)
+            script_file.write_text(write_script(client, item["data"], text))
+        script = script_file.read_text()
         directory.mkdir(parents=True, exist_ok=True)
-        path = directory / file_name(item, date.today())
+        path = directory / name
         path.write_bytes(synthesize(client, script))
         tag_mp3(path, item)
         zotero.add_tags(item, ["podcasted"])

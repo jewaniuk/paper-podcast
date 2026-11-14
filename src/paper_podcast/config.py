@@ -7,8 +7,8 @@ VAULT_LIBRARY = Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Docum
 PODCASTS_DIR = Path.home() / "Library/Mobile Documents/com~apple~CloudDocs/Podcasts"
 STATE_FILE = Path.home() / ".local/state/paper-podcast/state.json"
 
-GEMINI_TEXT_MODEL = os.environ.get("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
-GEMINI_TTS_MODEL = os.environ.get("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
+GEMINI_TEXT_MODEL = os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.8-flash")
+GEMINI_TTS_MODEL = os.environ.get("GEMINI_TTS_MODEL", "gemini-3.8-flash-tts")
 
 
 def env(name: str) -> str:

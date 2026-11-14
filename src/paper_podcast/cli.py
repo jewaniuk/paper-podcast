@@ -14,9 +14,11 @@ def main() -> None:
     sub.add_parser("migrate", help="copy the vault's Library/ into Zotero").add_argument(
         "--dry-run", action="store_true", help="look up everything but write nothing"
     )
+    sub.add_parser("podcast", help="make one episode").add_argument(
+        "--item", help="Zotero item key to use instead of a random pick (for testing)"
+    )
     for name, text in [
         ("enrich", "tag items changed since the last run"),
-        ("podcast", "make one episode"),
         ("pause", "stop new episodes"),
         ("resume", "allow new episodes"),
     ]:
@@ -27,7 +29,7 @@ def main() -> None:
     elif args.command == "enrich":
         enrich.run()
     elif args.command == "podcast":
-        podcast.run()
+        podcast.run(only_key=args.item)
     else:
         podcast.set_paused(args.command == "pause")
 
