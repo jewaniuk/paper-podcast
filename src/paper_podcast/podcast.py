@@ -2,14 +2,20 @@
 
 import base64
 import io
+import logging
 import random
 import re
+import time
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
+from typing import TypeVar
 
 import lameenc
 from pypdf import PdfReader
 from google import genai
+from google.genai import errors
+from google.genai._interactions import InternalServerError  # the Interactions API raises its own 5xx class
 from mutagen.id3 import COMM, ID3, TIT2, TPE1, WOAF
 
 from paper_podcast import sources
@@ -18,11 +24,17 @@ from paper_podcast.identifiers import arxiv_id
 from paper_podcast.pick import to_read
 from paper_podcast.zotero import Zotero
 
+T = TypeVar("T")
 HOSTS = {"Alex": "Kore", "Sam": "Puck"}  # speaker name -> Gemini voice
 SAMPLE_RATE = 24000  # Gemini tts output: 16-bit mono pcm at 24 kHz
 TTS_CHUNK_CHARS = 3500  # tts requests are limited in length, so the script is voiced in pieces
 SCRIPTS_DIR = Path(__file__).parents[2] / "scripts"  # generated scripts, never committed
+RETRY_WAITS = (120, 240, 480, 960)  # seconds between 5 attempts, about 30 minutes in all
+SERVER_ERRORS = (errors.ServerError, InternalServerError)  # 5xx, such as 503 "high demand"
 PROMPT_FILE = Path(__file__).parents[2] / "prompts" / "podcast.md"  # edit this file to change the episode style
+
+for _name in ("pypdf", "fontTools"):  # pypdf floods the log with font warnings
+    logging.getLogger(_name).setLevel(logging.ERROR)
 
 
 def is_paused(directory: Path = PODCASTS_DIR) -> bool:
@@ -111,6 +123,29 @@ def get_text(data: dict) -> str | None:
     return None
 
 
+def with_retry(call: Callable[[], T], waits: tuple[int, ...] = RETRY_WAITS) -> T:
+    """Calls Gemini, retrying on server errors with a growing wait.
+
+    Args:
+        call: Function making one Gemini request.
+        waits: Seconds to sleep before each retry; the call is tried
+            `len(waits) + 1` times.
+
+    Returns:
+        Whatever `call` returns.
+
+    Raises:
+        errors.ServerError: If the last attempt fails too.
+    """
+    for wait in waits:
+        try:
+            return call()
+        except SERVER_ERRORS as error:
+            print(f"gemini server error ({error}), retrying in {wait} s")
+            time.sleep(wait)
+    return call()
+
+
 def write_script(client: genai.Client, data: dict, text: str) -> str:
     """Has Gemini write the two-host script.
 
@@ -129,7 +164,8 @@ def write_script(client: genai.Client, data: dict, text: str) -> str:
         .replace("{title}", data["title"])
         .replace("{text}", text[:200_000])  # replace, not format, so braces in the paper are safe
     )
-    return client.models.generate_content(model=GEMINI_TEXT_MODEL, contents=prompt).text.strip()
+    response = with_retry(lambda: client.models.generate_content(model=GEMINI_TEXT_MODEL, contents=prompt))
+    return response.text.strip()
 
 
 def _turns(script: str) -> list[tuple[str, str]]:
@@ -178,11 +214,13 @@ def synthesize(client: genai.Client, script: str) -> bytes:
             {"type": "text", "text": text, "annotations": [{"type": "speech_metadata", "speaker": speaker}]}
             for speaker, text in piece
         ]
-        interaction = client.interactions.create(
-            model=GEMINI_TTS_MODEL,
-            input=[{"type": "user_input", "content": content}],
-            response_format={"type": "audio", "mime_type": "audio/l16"},  # raw pcm, so chunks can be joined
-            generation_config={"speech_config": {"speakers": speakers}},
+        interaction = with_retry(
+            lambda: client.interactions.create(
+                model=GEMINI_TTS_MODEL,
+                input=[{"type": "user_input", "content": content}],
+                response_format={"type": "audio", "mime_type": "audio/l16"},  # raw pcm, so chunks can be joined
+                generation_config={"speech_config": {"speakers": speakers}},
+            )
         )
         mp3 += encoder.encode(base64.b64decode(interaction.output_audio.data))
     return mp3 + encoder.flush()
