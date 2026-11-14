@@ -22,15 +22,7 @@ from paper_podcast.zotero import Zotero
 HOSTS = {"Alex": "Kore", "Sam": "Puck"}  # speaker name -> Gemini voice
 SAMPLE_RATE = 24000  # Gemini tts output: 16-bit mono pcm at 24 kHz
 TTS_CHUNK_CHARS = 3500  # tts requests are limited in length, so the script is voiced in pieces
-SCRIPT_PROMPT = """Write a podcast script of about 2600 words (a 15 to 20 minute episode) in which two hosts, \
-Alex and Sam, discuss the {kind} below for a listener who is a PhD student in quantum nanophotonics. \
-Explain the motivation, the key idea and results, and why it matters; be accurate and concrete, \
-and say when something is a limitation. Every line must start with "Alex:" or "Sam:". \
-No stage directions, headings or markdown.
-
-Title: {title}
-
-{text}"""
+PROMPT_FILE = Path(__file__).parents[2] / "prompts" / "podcast.md"  # edit this file to change the episode style
 
 
 def is_paused(directory: Path = PODCASTS_DIR) -> bool:
@@ -131,7 +123,12 @@ def write_script(client: genai.Client, data: dict, text: str) -> str:
         The script, one `Alex:`/`Sam:` line per turn.
     """
     kind = "news article" if data["itemType"] == "magazineArticle" else "research paper"
-    prompt = SCRIPT_PROMPT.format(kind=kind, title=data["title"], text=text[:200_000])
+    prompt = (
+        PROMPT_FILE.read_text()
+        .replace("{kind}", kind)
+        .replace("{title}", data["title"])
+        .replace("{text}", text[:200_000])  # replace, not format, so braces in the paper are safe
+    )
     return client.models.generate_content(model=GEMINI_TEXT_MODEL, contents=prompt).text.strip()
 
 
