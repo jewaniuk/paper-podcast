@@ -1,5 +1,6 @@
 """One-off move of the Obsidian `Library/` notes into Zotero."""
 
+import re
 from pathlib import Path
 
 import httpx
@@ -48,6 +49,18 @@ def note_to_item(note: dict) -> dict | None:
     return item
 
 
+def norm(title: str) -> str:
+    """Lowercase title with punctuation removed, for comparing titles.
+
+    Args:
+        title: Any title.
+
+    Returns:
+        Letters and digits only.
+    """
+    return re.sub(r"\W+", "", title).lower()
+
+
 def identity(item: dict) -> set[str]:
     """Keys that say two items are the same work.
 
@@ -70,9 +83,13 @@ def run(library: Path, dry_run: bool, failures_file: Path = Path("migrate-failur
         failures_file: Where to list notes that could not be identified.
     """
     zotero = None if dry_run else Zotero()
-    seen: set[str] = set().union(*(identity(i["data"]) for i in zotero.items())) if zotero else set()
+    existing = zotero.items() if zotero else []
+    seen: set[str] = set().union(*(identity(i["data"]) for i in existing))
+    titles = {norm(i["data"]["title"]) for i in existing}
     items, failed = [], []
     for note in read_library(library):
+        if norm(note["title"]) in titles:  # already migrated, so no lookup and no failure report
+            continue
         try:
             item = note_to_item(note)
         except (httpx.HTTPError, ValueError):  # a bad response fails that note, not the whole run

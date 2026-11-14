@@ -11,6 +11,15 @@ HTTP = httpx.Client(timeout=60, follow_redirects=True, headers={"User-Agent": "p
 ATOM = {"a": "http://www.w3.org/2005/Atom"}
 
 
+def _get(url: str, **kwargs) -> httpx.Response:
+    for attempt in range(4):  # crossref and openalex answer 429 or 5xx under load; wait and retry
+        response = HTTP.get(url, **kwargs)
+        if response.status_code != 429 and response.status_code < 500:
+            break
+        time.sleep(2 * (attempt + 1))
+    return response
+
+
 def _creators(names: list[tuple[str, str]]) -> list[dict]:
     return [
         {"creatorType": "author", "firstName": first, "lastName": last} if last else {"creatorType": "author", "name": first}
@@ -27,7 +36,7 @@ def crossref(doi: str) -> dict | None:
     Returns:
         A `journalArticle` item dict, or None if CrossRef doesn't know the DOI.
     """
-    response = HTTP.get(f"https://api.crossref.org/works/{doi}")
+    response = _get(f"https://api.crossref.org/works/{doi}")
     if response.status_code != 200:
         return None
     return _crossref_item(response.json()["message"])
@@ -57,7 +66,7 @@ def crossref_search(title: str, year: int | None) -> dict | None:
         A `journalArticle` item dict if the best hit's title matches
         exactly (ignoring case and punctuation), otherwise None.
     """
-    response = HTTP.get(
+    response = _get(
         "https://api.crossref.org/works", params={"query.bibliographic": title, "rows": 3}
     )
     if response.status_code != 200:
@@ -113,7 +122,7 @@ def openalex_work(doi: str) -> dict | None:
     Returns:
         The record, or None if OpenAlex does not know the DOI.
     """
-    response = HTTP.get(f"https://api.openalex.org/works/doi:{doi}")
+    response = _get(f"https://api.openalex.org/works/doi:{doi}")
     return response.json() if response.status_code == 200 else None
 
 
