@@ -14,7 +14,8 @@ def note_to_item(note: dict) -> dict | None:
     """Builds the Zotero item for one note.
 
     Articles come straight from the frontmatter. Papers are looked up by
-    arXiv ID, then DOI, then CrossRef title search. The `read: false`
+    DOI (from the url, or the journal DOI of an arXiv preprint), then
+    arXiv ID, then CrossRef title search. The `read: false`
     flag becomes the tag `to-read`; the note's own tags are dropped.
 
     Args:
@@ -35,12 +36,12 @@ def note_to_item(note: dict) -> dict | None:
         }
     else:
         aid = arxiv_id(url)
-        doi = doi_from_url(url)
-        item = (
-            sources.arxiv(aid) if aid
-            else sources.crossref(doi) if doi
-            else sources.crossref_search(note["title"], note.get("year"))
-        )
+        doi = doi_from_url(url) or (aid and sources.published_doi(aid))
+        item = sources.crossref(doi) if doi else None
+        if item is None and aid:
+            item = sources.arxiv(aid)
+        elif item is None:
+            item = sources.crossref_search(note["title"], note.get("year"))
         if item is None:
             return None
     item["tags"] = [] if note.get("read") else [{"tag": "to-read"}]

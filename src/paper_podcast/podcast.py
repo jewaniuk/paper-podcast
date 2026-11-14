@@ -196,10 +196,33 @@ def tag_mp3(path: Path, item: dict) -> None:
     tags.save(path)
 
 
+def upgrade_preprint(zotero: Zotero, item: dict) -> dict:
+    """Replaces a preprint with its journal version in Zotero, if one exists.
+
+    Args:
+        zotero: Zotero client.
+        item: A Zotero item dict.
+
+    Returns:
+        The updated item (now a `journalArticle` with a DOI), or the same
+        item if it is not a preprint or has not been published.
+    """
+    data = item["data"]
+    aid = arxiv_id(data.get("url", "")) if data["itemType"] == "preprint" else None
+    doi = sources.published_doi(aid) if aid else None
+    journal = sources.crossref(doi) if doi else None
+    if journal is None:
+        return item
+    kept = {k: data[k] for k in ("tags", "collections") if k in data}
+    saved = zotero.write([{"key": item["key"], "version": item["version"], **journal, **kept}])[0]
+    return item if "failed" in saved else saved
+
+
 def run(directory: Path = PODCASTS_DIR) -> None:
     """Makes one episode, unless paused.
 
-    Picks random eligible items until one yields text (items without one
+    Picks random eligible items (swapping a preprint for its journal
+    version first, if published) until one yields text (items without one
     are tagged `no-pdf`), writes and voices the script, saves the mp3 and
     tags the item `podcasted`.
 
@@ -213,6 +236,7 @@ def run(directory: Path = PODCASTS_DIR) -> None:
     pool = eligible(zotero.items())
     random.shuffle(pool)
     for item in pool:
+        item = upgrade_preprint(zotero, item)
         text = get_text(item["data"])
         if text is None:
             zotero.add_tags(item, ["no-pdf"])

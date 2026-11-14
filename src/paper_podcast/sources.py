@@ -103,6 +103,19 @@ def arxiv(arxiv_id: str) -> dict | None:
     }
 
 
+def openalex_work(doi: str) -> dict | None:
+    """Fetches the raw OpenAlex record for a DOI.
+
+    Args:
+        doi: A DOI (arXiv preprints use `10.48550/arXiv.<id>`).
+
+    Returns:
+        The record, or None if OpenAlex does not know the DOI.
+    """
+    response = HTTP.get(f"https://api.openalex.org/works/doi:{doi}")
+    return response.json() if response.status_code == 200 else None
+
+
 def openalex(doi: str) -> dict | None:
     """Fetches keywords and the last author for enrichment.
 
@@ -112,10 +125,9 @@ def openalex(doi: str) -> dict | None:
     Returns:
         `{"keywords": [...], "last_author": "<surname>"}` or None if unknown.
     """
-    response = HTTP.get(f"https://api.openalex.org/works/doi:{doi}")
-    if response.status_code != 200:
+    work = openalex_work(doi)
+    if work is None:
         return None
-    work = response.json()
     authors = work.get("authorships") or []
     surname = authors[-1]["author"]["display_name"].split()[-1] if authors else ""
     return {"keywords": [k["display_name"] for k in work.get("keywords", [])], "last_author": surname}
@@ -209,3 +221,20 @@ def page_text(url: str) -> str:
     extractor = _TextExtractor()
     extractor.feed(HTTP.get(url).text)
     return "\n".join(extractor.parts)
+
+
+def published_doi(arxiv_id: str) -> str | None:
+    """Finds the journal DOI of a preprint, if it has been published.
+
+    OpenAlex merges a preprint and its published version into one work,
+    and that work's `doi` is the journal one once it exists.
+
+    Args:
+        arxiv_id: ID without version.
+
+    Returns:
+        The journal DOI, or None if the paper is still preprint-only.
+    """
+    work = openalex_work(f"10.48550/arXiv.{arxiv_id}")
+    doi = ((work or {}).get("doi") or "").removeprefix("https://doi.org/")
+    return doi if doi and "arxiv" not in doi.lower() else None

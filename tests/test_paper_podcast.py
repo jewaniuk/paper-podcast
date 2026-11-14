@@ -103,3 +103,27 @@ def test_run_does_nothing_when_paused(tmp_path, capsys):
     podcast.set_paused(True, tmp_path)
     podcast.run(tmp_path)
     assert "paused" in capsys.readouterr().out
+
+
+def test_upgrade_preprint_swaps_in_journal_version(monkeypatch):
+    journal = {"itemType": "journalArticle", "title": "T", "DOI": "10.1/x", "creators": []}
+    monkeypatch.setattr(podcast.sources, "published_doi", lambda aid: "10.1/x")
+    monkeypatch.setattr(podcast.sources, "crossref", lambda doi: dict(journal))
+
+    class FakeZotero:
+        def write(self, items):
+            self.sent = items
+            return [{"key": "K", "version": 9, "data": items[0]}]
+
+    item = {"key": "K", "version": 3, "data": {"itemType": "preprint", "url": "https://arxiv.org/abs/2510.09251",
+                                               "tags": [{"tag": "to-read"}]}}
+    zotero = FakeZotero()
+    new = podcast.upgrade_preprint(zotero, item)
+    assert zotero.sent[0]["itemType"] == "journalArticle" and zotero.sent[0]["tags"] == [{"tag": "to-read"}]
+    assert new["version"] == 9
+
+
+def test_upgrade_preprint_leaves_unpublished_alone(monkeypatch):
+    monkeypatch.setattr(podcast.sources, "published_doi", lambda aid: None)
+    item = {"key": "K", "version": 3, "data": {"itemType": "preprint", "url": "https://arxiv.org/abs/2510.09251"}}
+    assert podcast.upgrade_preprint(None, item) is item
