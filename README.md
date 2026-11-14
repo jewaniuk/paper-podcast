@@ -2,7 +2,6 @@
 
 Tools for a Zotero paper library and a daily two-host podcast of one unread paper.
 
-- `paper-podcast migrate [--dry-run]` copies the Obsidian `Library/` notes into Zotero
 - `paper-podcast enrich` adds OpenAlex keywords and `group/<last author>` as automatic tags to items changed since the last run
 - `paper-podcast podcast` makes one episode into iCloud Drive `Podcasts/` and tags the item `podcasted`
 - `paper-podcast pause` / `resume` create / remove `Podcasts/paused`, which stops `podcast` (it can also be done in the iOS Files app)

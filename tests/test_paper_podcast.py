@@ -4,9 +4,7 @@ from datetime import date
 import pytest
 
 from paper_podcast import podcast
-from paper_podcast.frontmatter import parse_note, read_library
 from paper_podcast.identifiers import arxiv_id, clean_url, doi_from_url
-from paper_podcast.migrate import note_to_item
 from paper_podcast.pick import sample
 
 
@@ -45,25 +43,6 @@ def test_clean_url_drops_tracking_keeps_real_params():
     url = "https://opg.optica.org/prj/fulltext.cfm?uri=prj-1-3-110&id=260842&utm_source=a&WT.ec_id=b"
     assert clean_url(url) == "https://opg.optica.org/prj/fulltext.cfm?uri=prj-1-3-110&id=260842"
     assert clean_url("https://www-science-org.proxy.queensu.ca/doi/10.1126/x") == "https://www.science.org/doi/10.1126/x"
-
-
-def test_parse_note(tmp_path):
-    (tmp_path / "A title.md").write_text("---\ntype: paper\nread: false\nyear: 2024\n---\nbody")
-    (tmp_path / "Library.md").write_text("---\ntype: navigator\n---\n")
-    (tmp_path / "plain.md").write_text("no frontmatter")
-    assert parse_note(tmp_path / "A title.md") == {"type": "paper", "read": False, "year": 2024, "title": "A title"}
-    assert parse_note(tmp_path / "plain.md") is None
-    assert [n["title"] for n in read_library(tmp_path)] == ["A title"]
-
-
-def test_article_item_from_note():
-    note = {"type": "article", "title": "t", "source": "Nature", "year": 2024, "read": False,
-            "url": "https://www.nature.com/articles/d41586-1?utm_source=a", "tags": ["article/x"]}
-    item = note_to_item(note)
-    assert item["itemType"] == "magazineArticle"
-    assert item["url"] == "https://www.nature.com/articles/d41586-1"
-    assert item["tags"] == [{"tag": "to-read"}]
-    assert note_to_item({**note, "read": True})["tags"] == []
 
 
 def _item(kind, title, tags=()):
@@ -127,3 +106,24 @@ def test_upgrade_preprint_leaves_unpublished_alone(monkeypatch):
     monkeypatch.setattr(podcast.sources, "published_doi", lambda aid: None)
     item = {"key": "K", "version": 3, "data": {"itemType": "preprint", "url": "https://arxiv.org/abs/2510.09251"}}
     assert podcast.upgrade_preprint(None, item) is item
+
+
+def test_with_retry_retries_server_errors_then_gives_up(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(podcast.time, "sleep", sleeps.append)
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) < 3:
+            raise podcast.errors.ServerError(503, {"error": {"message": "high demand"}})
+        return "ok"
+
+    assert podcast.with_retry(flaky, waits=(1, 2, 3)) == "ok"
+    assert sleeps == [1, 2]
+
+    def always():
+        raise podcast.errors.ServerError(503, {"error": {"message": "high demand"}})
+
+    with pytest.raises(podcast.errors.ServerError):
+        podcast.with_retry(always, waits=(1, 2))

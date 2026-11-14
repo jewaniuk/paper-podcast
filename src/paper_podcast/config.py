@@ -3,7 +3,6 @@
 import os
 from pathlib import Path
 
-VAULT_LIBRARY = Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/PhD/Library"
 PODCASTS_DIR = Path.home() / "Library/Mobile Documents/com~apple~CloudDocs/Podcasts"
 STATE_FILE = Path.home() / ".local/state/paper-podcast/state.json"
 

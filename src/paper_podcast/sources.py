@@ -150,8 +150,9 @@ def _is_pdf(response: httpx.Response) -> bool:
 def publisher_pdf(doi: str) -> bytes | None:
     """Gets the PDF from the publisher through the DOI landing page.
 
-    Works only from a network with a subscription (Queen's WiFi): reads the
-    page's `citation_pdf_url` meta tag, which publishers set for indexers.
+    Reads the page's `citation_pdf_url` meta tag, which publishers set for
+    indexers. Works for open publishers such as Nature; APS, Science and
+    Optica block scripted requests, so those fall through to arXiv and Unpaywall.
 
     Args:
         doi: The article's DOI.
