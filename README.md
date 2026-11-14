@@ -5,7 +5,8 @@ Tools for a Zotero paper library and a daily two-host podcast of one unread pape
 - `paper-podcast enrich` adds OpenAlex keywords and `group/<last author>` as automatic tags to items changed since the last run
 - `paper-podcast podcast` makes one episode into iCloud Drive `Podcasts/` and tags the item `podcasted`
 - `paper-podcast pause` / `resume` create / remove `Podcasts/paused`, which stops `podcast` (it can also be done in the iOS Files app)
-- `paper-pick [-n N]` prints N random `to-read` papers and N articles
+- `paper-podcast progress` prints how many papers and articles are read (not tagged `to-read`), with the percentage
+- `paper-pick [-n N]` prints N random `to-read` papers and N articles: the title (cmd-click to open), first author, journal, year, research group and three keywords
 
 ## Setup
 

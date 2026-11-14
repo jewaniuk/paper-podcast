@@ -1,11 +1,11 @@
 import random
+import sys
 from datetime import date
 
 import pytest
 
-from paper_podcast import podcast
+from paper_podcast import cli, pick, podcast
 from paper_podcast.identifiers import arxiv_id, clean_url, doi_from_url
-from paper_podcast.pick import sample
 
 
 @pytest.mark.parametrize(
@@ -52,9 +52,49 @@ def _item(kind, title, tags=()):
 def test_sample_only_unread_by_kind():
     items = [_item("journalArticle", f"p{i}", ["to-read"]) for i in range(5)]
     items += [_item("magazineArticle", "a0", ["to-read"]), _item("journalArticle", "read")]
-    papers, articles = sample(items, 3, random.Random(0))
+    papers, articles = (pick.sample(pool, 3, random.Random(0)) for pool in pick.split_kinds(pick.to_read(items)))
     assert len(papers) == 3 and all("to-read" in [t["tag"] for t in p["data"]["tags"]] for p in papers)
     assert [a["data"]["title"] for a in articles] == ["a0"]
+
+
+def test_progress():
+    items = [_item("journalArticle", "a", ["to-read"]), _item("journalArticle", "b"), _item("journalArticle", "c")]
+    assert pick.progress("papers", items) == "papers    2 / 3 read (66.7%)"
+    assert pick.progress("articles", []) == "articles  0 / 0 read (0.0%)"
+
+
+@pytest.mark.parametrize(
+    "data, expected",
+    [
+        ({"itemType": "journalArticle", "creators": [{"firstName": "Hao", "lastName": "Tang"}, {"lastName": "Li"}],
+          "publicationTitle": "Physical Review Applied", "date": "2024-03-01"}, "Hao Tang et al. · Physical Review Applied · 2024"),
+        ({"itemType": "journalArticle", "creators": [{"firstName": "Hao", "lastName": "Tang"}],
+          "publicationTitle": "Optica", "date": "2023"}, "Hao Tang · Optica · 2023"),
+        ({"itemType": "preprint", "creators": [{"name": "QNL Collaboration"}], "date": "2025-01"}, "QNL Collaboration · arXiv · 2025"),
+        ({"itemType": "magazineArticle", "publicationTitle": "Quanta Magazine", "date": "2025"}, "Quanta Magazine · 2025"),
+    ],
+)
+def test_byline(data, expected):
+    assert pick.byline({"data": data}) == expected
+
+
+def test_tag_line_group_then_three_keywords():
+    tags = [{"tag": "to-read"}, {"tag": "podcasted"}] + [{"tag": f"k{i}", "type": 1} for i in range(5)]
+    tags.append({"tag": "group/shastri", "type": 1})
+    assert pick.tag_line({"data": {"tags": tags}}) == "group/shastri · k0, k1, k2"
+    assert pick.tag_line({"data": {"tags": [{"tag": "to-read"}]}}) == ""
+
+
+def test_pick_main_plain_when_piped(monkeypatch, capsys):
+    item = {"key": "K", "data": {"itemType": "journalArticle", "title": "T", "DOI": "10.1/x", "date": "2024",
+                                 "creators": [{"firstName": "A", "lastName": "B"}], "tags": [{"tag": "to-read"}]}}
+    monkeypatch.setattr(cli, "Zotero", lambda: type("Z", (), {"items": lambda self: [item]})())
+    monkeypatch.setattr(sys, "argv", ["paper-pick"])
+    cli.pick_main()
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    assert "papers  (1 of 1 to-read)\n\n  T\n  A B · arXiv · 2024\n" in out
+    assert "articles  (0 of 0 to-read)" in out
 
 
 def test_eligible_skips_podcasted_and_no_pdf():
