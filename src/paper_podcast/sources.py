@@ -13,7 +13,8 @@ ATOM = {"a": "http://www.w3.org/2005/Atom"}
 
 def _creators(names: list[tuple[str, str]]) -> list[dict]:
     return [
-        {"creatorType": "author", "firstName": first, "lastName": last} for first, last in names
+        {"creatorType": "author", "firstName": first, "lastName": last} if last else {"creatorType": "author", "name": first}
+        for first, last in names
     ]
 
 
@@ -37,7 +38,7 @@ def _crossref_item(work: dict) -> dict:
     return {
         "itemType": "journalArticle",
         "title": (work.get("title") or [""])[0],
-        "creators": _creators([(a.get("given", ""), a.get("family", "")) for a in work.get("author", [])]),
+        "creators": _creators([(a.get("given", a.get("name", "")), a.get("family", "")) for a in work.get("author", [])]),
         "publicationTitle": (work.get("container-title") or [""])[0],
         "date": "-".join(str(p) for p in parts if p),
         "DOI": work["DOI"],
