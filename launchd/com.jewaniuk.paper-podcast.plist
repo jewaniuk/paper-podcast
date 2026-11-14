@@ -9,7 +9,7 @@
     <array>
         <string>/bin/zsh</string>
         <string>-c</string>
-        <string>source ~/.config/secrets.zsh; cd ~/Documents/paper-podcast; uv run paper-podcast enrich; uv run paper-podcast podcast</string>
+        <string>source ~/.config/secrets.zsh; cd ~/paper-podcast; uv run paper-podcast enrich; uv run paper-podcast podcast</string>
     </array>
     <!-- 3 am, monday to friday (weekday 1 = monday) -->
     <key>StartCalendarInterval</key>
